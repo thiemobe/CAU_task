@@ -1,0 +1,7 @@
+input_size,output_size,input_features,output_features,training_examples,gradient_steps,learning_rate,pixel_mse,max_abs_weight_error_vs_pseudoinverse,sample_indices,weights_file
+64,64,4096,4096,3,20000,0.002351309686590972,4.912814145405373e-32,1.509274966285758e-17,1;2;4,Outputs\regression_results\weights\input64_output64.npz
+64,16,4096,256,3,20000,0.002351309686590972,4.039214989338593e-32,1.509274966285758e-17,1;2;4,Outputs\regression_results\weights\input64_output16.npz
+8,64,64,4096,3,20000,0.1842153551590239,7.717009735095023e-32,7.216449660063518e-16,1;2;4,Outputs\regression_results\weights\input8_output64.npz
+8,16,64,256,3,20000,0.1842153551590239,7.161704952670721e-32,6.661338147750939e-16,1;2;4,Outputs\regression_results\weights\input8_output16.npz
+4,64,16,4096,3,20000,0.9435561398468844,9.029183864305239e-31,6.439293542825908e-15,1;2;4,Outputs\regression_results\weights\input4_output64.npz
+4,16,16,256,3,20000,0.9435561398468844,8.015844387926148e-31,5.551115123125783e-15,1;2;4,Outputs\regression_results\weights\input4_output16.npz
