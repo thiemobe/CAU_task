@@ -275,7 +275,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--mode", choices=("software", "surrogate"), default="software")
     parser.add_argument("--input-sizes", nargs="+", type=int, default=[64, 8, 4])
-    parser.add_argument("--output-sizes", nargs="+", type=int, default=[64, 16])
+    parser.add_argument("--output-sizes", nargs="+", type=int, default=[64, 8])
     parser.add_argument(
         "--steps",
         type=int,

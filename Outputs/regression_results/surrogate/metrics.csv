@@ -1,2 +1,2 @@
 input_size,output_size,input_features,output_features,training_examples,gradient_steps,learning_rate,surrogate_weight_updates,pixel_mse,max_abs_weight_error_vs_pseudoinverse,sample_indices,weights_file
-8,16,64,256,3,10000,1.0,16136,0.17111559936503587,,1;2;4,Outputs\regression_results\surrogate\weights\input8_output16.npz
+8,8,64,64,3,10000,1.0,18008,0.1510868917682839,,1;2;4,Outputs\regression_results\surrogate\weights\input8_output8.npz
