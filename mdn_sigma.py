@@ -32,7 +32,7 @@ G_RANGE  = G_MAX_US - G_MIN_US  # 125 µS
 # ── lookup-row matching defaults ──────────────────────────────────────────────
 G_BEFORE_WEIGHT = 0.5
 G_AFTER_WEIGHT = 0.5
-MIN_PI_FOR_MEAN_MATCH = 0.4
+MIN_PI_FOR_MEAN_MATCH = 0.2
 MAX_RESAMPLE_ATTEMPTS = 50
 
 
@@ -70,6 +70,7 @@ def _pick_best_row_by_g_before_and_desired_after(
     g_after_weight=G_AFTER_WEIGHT,
     min_pi_for_mean_match=MIN_PI_FOR_MEAN_MATCH,
     g_current_uS_override=None,
+    voltage_range=None,
 ):
     """
     Pick best row using two conductance-space targets:
@@ -94,6 +95,22 @@ def _pick_best_row_by_g_before_and_desired_after(
 
     polarity = 'RESET' if grad > 0 else 'SET'
     df = df_reset if polarity == 'RESET' else df_set
+    if voltage_range is not None:
+        if len(voltage_range) != 2:
+            raise ValueError('voltage_range must contain a minimum and maximum voltage.')
+        voltage_min, voltage_max = map(float, voltage_range)
+        if not np.isfinite(voltage_min) or not np.isfinite(voltage_max) or voltage_min > voltage_max:
+            raise ValueError('voltage_range must be finite and ordered from minimum to maximum.')
+        if 'voltage' not in df.columns:
+            raise ValueError('Lookup table must contain a voltage column for voltage filtering.')
+        row_voltages = pd.to_numeric(df['voltage'], errors='coerce')
+        df = df.loc[row_voltages.between(voltage_min, voltage_max, inclusive='both')]
+        if df.empty:
+            raise ValueError(
+                f'No {polarity} lookup rows in voltage range '
+                f'[{voltage_min:.4g}, {voltage_max:.4g}] V.'
+            )
+        df = df.reset_index(drop=True)
 
     g_before_vals = df['g_before_uS'].values.astype(float)
     mu1_vals = df['mu_1_uS'].values.astype(float)
@@ -209,7 +226,7 @@ def get_sigma_from_lookup(w_current, grad, df_set, df_reset):
 def sample_weight_from_lookup(w_current, grad, df_set, df_reset, return_debug=False,
                                max_resample_attempts=MAX_RESAMPLE_ATTEMPTS, voltage_override=None,
                                post_pulse_read_noise=False, post_pulse_read_noise_std_uS=0.0,
-                               enforce_monotonicity=True):
+                               enforce_monotonicity=True, voltage_range=None):
     """
     Sample a next weight from the best-match row's Gaussian mixture.
 
@@ -247,6 +264,10 @@ def sample_weight_from_lookup(w_current, grad, df_set, df_reset, return_debug=Fa
     voltage_override is kept only for backward compatibility and is ignored in
     this row-selection mode.
 
+    voltage_range optionally restricts selected lookup rows to an inclusive
+    (minimum_voltage, maximum_voltage) interval. If no eligible row remains,
+    the current weight is returned unchanged.
+
     Returns:
         w_sampled - sampled next weight in [-1, 1]
         g_sampled_uS - sampled next conductance in µS
@@ -263,10 +284,10 @@ def sample_weight_from_lookup(w_current, grad, df_set, df_reset, return_debug=Fa
             df_set,
             df_reset,
             g_current_uS_override=g_current_true_uS,
+            voltage_range=voltage_range,
         )
     except ValueError:
-        # Strict pi-threshold matching found no eligible component.
-        # Hold state (no update) rather than violating the matching constraint.
+        # No row/component matched the constraints; hold rather than pulse.
         if not return_debug:
             return float(w_current), float(g_current_true_uS), 'RESET' if grad > 0 else 'SET'
 

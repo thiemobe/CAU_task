@@ -45,6 +45,7 @@ OUTPUT_SIZE = 8;
 EPOCHS = 500;
 LEARNING_RATE = 1.0;
 SAMPLE_MSE_THRESHOLD = 0.2; %try 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.2
+MAX_SAMPLES_PER_DIGIT = []; % [] uses every training example; set e.g. 100 to cap each class
 % Enable from MATLAB with setenv('CAU_RUN_HARDWARE', '1') before running.
 RUN_HARDWARE = strcmp(getenv('CAU_RUN_HARDWARE'), '1');
 fprintf('Sample MSE gate: update samples only when MSE > %.4g.\n', ...
@@ -69,37 +70,38 @@ READ_CURRENT_COMPLIANCE_FRACTION = 0.95;
 READ_VOLTAGE_RELATIVE_TOLERANCE = 0.05;
 READ_VOLTAGE_ABSOLUTE_TOLERANCE = 5e-3;
 
-%% Load the first training example of each digit and matching letter target
+%% Load training and held-out test examples
 if ~isfile(inputFile)
     error('MNIST input file not found: %s', inputFile);
 end
-matData = load(inputFile, 'imagesTrain', 'labelsTrain');
-if ~isfield(matData, 'imagesTrain') || ~isfield(matData, 'labelsTrain')
-    error('MAT file must contain imagesTrain and labelsTrain.');
+matData = load(inputFile, 'imagesTrain', 'labelsTrain', 'imagesTest', 'labelsTest');
+if ~isfield(matData, 'imagesTrain') || ~isfield(matData, 'labelsTrain') || ...
+        ~isfield(matData, 'imagesTest') || ~isfield(matData, 'labelsTest')
+    error('MAT file must contain training and test images and labels.');
 end
 imagesTrain = double(matData.imagesTrain);
 labelsTrain = double(matData.labelsTrain(:));
+imagesTest = double(matData.imagesTest);
+labelsTest = double(matData.labelsTest(:));
 if size(imagesTrain, 1) < 2 || ~all(abs(imagesTrain(1, :) - 1) < 1e-8)
     error('Expected imagesTrain rows to be bias followed by 24x24 pixels.');
+end
+if size(imagesTest, 1) ~= size(imagesTrain, 1) || ...
+        ~all(abs(imagesTest(1, :) - 1) < 1e-8)
+    error('Expected imagesTest to use the same bias-plus-pixels layout as imagesTrain.');
+end
+if ~isempty(MAX_SAMPLES_PER_DIGIT)
+    validateattributes(MAX_SAMPLES_PER_DIGIT, {'numeric'}, ...
+        {'scalar', 'real', 'finite', 'integer', 'positive'});
 end
 
 digitLabels = [1, 2, 3];
 letterNames = {'c', 'a', 'u'};
-sampleIndices = zeros(1, 3);
-inputBatch = zeros(INPUT_SIZE * INPUT_SIZE, 3);
-targetBatch = zeros(OUTPUT_SIZE * OUTPUT_SIZE, 3);
-for sample = 1:3
-    sourceIndex = find(labelsTrain == digitLabels(sample), 1, 'first');
-    if isempty(sourceIndex)
-        error('No training example found for digit %d.', digitLabels(sample));
-    end
-    sampleIndices(sample) = sourceIndex - 1;
-    sourceImage = reshape(imagesTrain(2:end, sourceIndex), 24, 24);
-    resizedInput = imresize(sourceImage, [INPUT_SIZE, INPUT_SIZE], 'bilinear');
-    inputBatch(:, sample) = resizedInput(:);
-
+targetByDigit = zeros(OUTPUT_SIZE * OUTPUT_SIZE, numel(digitLabels));
+for digitPosition = 1:numel(digitLabels)
+    letter = letterNames{digitPosition};
     targetPath = fullfile(outputsDir, ...
-        sprintf('%s_%d.png', letterNames{sample}, OUTPUT_SIZE));
+        sprintf('%s_%d.png', letter, OUTPUT_SIZE));
     if ~isfile(targetPath)
         error('Letter target not found: %s', targetPath);
     end
@@ -109,14 +111,57 @@ for sample = 1:3
     end
     targetImage = im2double(imresize(targetImage, ...
         [OUTPUT_SIZE, OUTPUT_SIZE], 'bilinear'));
-    targetBatch(:, sample) = targetImage(:);
+    targetByDigit(:, digitPosition) = targetImage(:);
+end
+
+sampleIndicesByDigit = cell(numel(digitLabels), 1);
+for digitPosition = 1:numel(digitLabels)
+    digitIndices = find(labelsTrain == digitLabels(digitPosition));
+    if isempty(digitIndices)
+        error('No training examples found for digit %d.', digitLabels(digitPosition));
+    end
+    if ~isempty(MAX_SAMPLES_PER_DIGIT)
+        digitIndices = digitIndices(1:min(numel(digitIndices), MAX_SAMPLES_PER_DIGIT));
+    end
+    sampleIndicesByDigit{digitPosition} = digitIndices;
+end
+sampleIndices = sort(vertcat(sampleIndicesByDigit{:}));
+sampleDigitLabels = labelsTrain(sampleIndices);
+testSampleIndices = find(ismember(labelsTest, digitLabels));
+if isempty(testSampleIndices)
+    error('No held-out test examples found for digits 1, 2, or 3.');
+end
+testDigitLabels = labelsTest(testSampleIndices);
+
+inputBatch = zeros(INPUT_SIZE * INPUT_SIZE, numel(sampleIndices));
+targetBatch = zeros(OUTPUT_SIZE * OUTPUT_SIZE, numel(sampleIndices));
+for sample = 1:numel(sampleIndices)
+    sourceImage = reshape(imagesTrain(2:end, sampleIndices(sample)), 24, 24);
+    resizedInput = imresize(sourceImage, [INPUT_SIZE, INPUT_SIZE], 'bilinear');
+    inputBatch(:, sample) = resizedInput(:);
+    digitPosition = find(digitLabels == sampleDigitLabels(sample), 1);
+    targetBatch(:, sample) = targetByDigit(:, digitPosition);
+end
+
+testInputBatch = zeros(INPUT_SIZE * INPUT_SIZE, numel(testSampleIndices));
+testTargetBatch = zeros(OUTPUT_SIZE * OUTPUT_SIZE, numel(testSampleIndices));
+for sample = 1:numel(testSampleIndices)
+    sourceImage = reshape(imagesTest(2:end, testSampleIndices(sample)), 24, 24);
+    resizedInput = imresize(sourceImage, [INPUT_SIZE, INPUT_SIZE], 'bilinear');
+    testInputBatch(:, sample) = resizedInput(:);
+    digitPosition = find(digitLabels == testDigitLabels(sample), 1);
+    testTargetBatch(:, sample) = targetByDigit(:, digitPosition);
 end
 
 Nin = size(inputBatch, 1);
 Nout = size(targetBatch, 1);
 requiredDevices = Nin * Nout;
-fprintf('Digit samples 1/2/3 use MAT columns %s (zero-based indices %s).\n', ...
-    mat2str(sampleIndices + 1), mat2str(sampleIndices));
+fprintf('Training examples: %d (digits 1/2/3: %d/%d/%d); held-out test examples: %d.\n', ...
+    numel(sampleIndices), sum(sampleDigitLabels == 1), ...
+    sum(sampleDigitLabels == 2), sum(sampleDigitLabels == 3), numel(testSampleIndices));
+if ~isempty(MAX_SAMPLES_PER_DIGIT)
+    fprintf('Training capped at %d examples per digit.\n', MAX_SAMPLES_PER_DIGIT);
+end
 fprintf('Linear map: %d inputs -> %d output pixels; one device per weight (%d devices).\n', ...
     Nin, Nout, requiredDevices);
 fprintf('Signed weight encoding: W = (G - %.1f uS) / %.1f uS.\n', ...
@@ -160,6 +205,7 @@ end
 
 hardwareConfig = struct( ...
     'inputSize', INPUT_SIZE, 'outputSize', OUTPUT_SIZE, 'epochs', EPOCHS, ...
+    'maxSamplesPerDigit', MAX_SAMPLES_PER_DIGIT, ...
     'learningRate', LEARNING_RATE, 'sampleMSEThreshold', SAMPLE_MSE_THRESHOLD, ...
     'gMin', G_MIN, 'gMax', G_MAX, ...
     'gVoltageScale', G_VOLTAGE_SCALE, 'gBias', G_BIAS, ...
@@ -171,11 +217,13 @@ hardwareConfig = struct( ...
     'readCurrentComplianceFraction', READ_CURRENT_COMPLIANCE_FRACTION, ...
     'readVoltageRelativeTolerance', READ_VOLTAGE_RELATIVE_TOLERANCE, ...
     'readVoltageAbsoluteTolerance', READ_VOLTAGE_ABSOLUTE_TOLERANCE);
-runHardwareTraining(inputBatch, targetBatch, sampleIndices, digitLabels, ...
-    letterNames, mapData.HRS2LRS, resultsDir, hardwareConfig);
+runHardwareTraining(inputBatch, targetBatch, sampleIndices, sampleDigitLabels, ...
+    testInputBatch, testTargetBatch, testSampleIndices, testDigitLabels, ...
+    digitLabels, letterNames, mapData.HRS2LRS, resultsDir, hardwareConfig);
 return;
 
-function runHardwareTraining(inputBatch, targetBatch, sampleIndices, ...
+function runHardwareTraining(inputBatch, targetBatch, sampleIndices, sampleDigitLabels, ...
+    testInputBatch, testTargetBatch, testSampleIndices, testDigitLabels, ...
     digitLabels, letterNames, crossbarMap, resultsDir, config)
 requiredFunctions = {'deviceWeightMapping', 'connectArduino', 'connectSMU', ...
     'turnOnSMUChannels', 'turnOffSMUChannels', 'setDeviceN', 'resetDeviceN', ...
@@ -189,6 +237,7 @@ end
 
 Nin = size(inputBatch, 1);
 Nout = size(targetBatch, 1);
+nTrain = size(inputBatch, 2);
 if config.inputSize > size(crossbarMap, 1) || config.outputSize^2 > size(crossbarMap, 2) * size(crossbarMap, 1)
     error('The configured weight matrix does not fit the crossbar dimensions.');
 end
@@ -249,11 +298,15 @@ for outputIndex = 1:Nout
 end
 weights = conductanceToWeights(conductance, config.gMin, config.gMax);
 initialPredictions = weights * inputBatch;
-initialSampleMSE = mean((initialPredictions - targetBatch).^2, 1);
-fprintf('Initial sample MSEs: digit 1=%.6g, digit 2=%.6g, digit 3=%.6g.\n', ...
-    initialSampleMSE(1), initialSampleMSE(2), initialSampleMSE(3));
-fprintf('Threshold %.6g means %d/3 samples currently trigger updates.\n', ...
-    config.sampleMSEThreshold, sum(initialSampleMSE > config.sampleMSEThreshold));
+initialTestPredictions = weights * testInputBatch;
+initialTrainingMSE = mean((initialPredictions - targetBatch).^2, 'all');
+initialTestMSE = mean((initialTestPredictions - testTargetBatch).^2, 'all');
+fprintf('Initial training pixel MSE: %.8g; test pixel MSE: %.8g.\n', ...
+    initialTrainingMSE, initialTestMSE);
+fprintf('Threshold %.6g: %d/%d training samples currently trigger updates.\n', ...
+    config.sampleMSEThreshold, ...
+    sum(mean((initialPredictions - targetBatch).^2, 1) > config.sampleMSEThreshold), ...
+    nTrain);
 drawnow;
 
 if ~isfolder(resultsDir)
@@ -266,16 +319,28 @@ if metricsHandle < 0
 end
 metricsCleanup = onCleanup(@() fclose(metricsHandle));
 fprintf(metricsHandle, ...
-    'epoch,training_pixel_mse,samples_above_threshold,updates_applied\n');
+    ['epoch,training_pixel_mse,test_pixel_mse,samples_above_threshold,', ...
+    'zero_gradient_samples,updates_applied\n']);
 
-updates = zeros(config.epochs * size(inputBatch, 2), 8);
+updatesFile = fullfile(resultsDir, 'weight_updates.csv');
+updatesHandle = fopen(updatesFile, 'w');
+if updatesHandle < 0
+    error('Could not create update log: %s', updatesFile);
+end
+updatesCleanup = onCleanup(@() fclose(updatesHandle));
+fprintf(updatesHandle, ['epoch,training_sample_index,digit_label,output_index,', ...
+    'input_index,sample_mse,gradient,desired_weight,measured_conductance_S,', ...
+    'measured_weight\n']);
+
 updateCount = 0;
 mseHistory = zeros(config.epochs, 1);
+testMSEHistory = zeros(config.epochs, 1);
 fprintf('Starting training for %d epochs.\n', config.epochs);
 drawnow;
 for epoch = 1:config.epochs
-    sampleOrder = randperm(size(inputBatch, 2));
+    sampleOrder = randperm(nTrain);
     samplesAboveThreshold = 0;
+    zeroGradientCount = 0;
     epochUpdateCount = 0;
     for samplePosition = 1:numel(sampleOrder)
         sampleIndex = sampleOrder(samplePosition);
@@ -289,14 +354,13 @@ for epoch = 1:config.epochs
         end
         samplesAboveThreshold = samplesAboveThreshold + 1;
 
-        activeOutputs = find(abs(residual) > eps);
-        activeInputs = find(abs(inputVector) > eps);
-        if isempty(activeOutputs) || isempty(activeInputs)
+        outputIndex = randi(Nout);
+        inputIndex = randi(Nin);
+        gradient = residual(outputIndex) * inputVector(inputIndex);
+        if gradient == 0
+            zeroGradientCount = zeroGradientCount + 1;
             continue;
         end
-        outputIndex = activeOutputs(randi(numel(activeOutputs)));
-        inputIndex = activeInputs(randi(numel(activeInputs)));
-        gradient = residual(outputIndex) * inputVector(inputIndex);
 
         oldWeight = weights(outputIndex, inputIndex);
         desiredWeight = min(max(oldWeight - config.learningRate * gradient, ...
@@ -310,48 +374,58 @@ for epoch = 1:config.epochs
 
         updateCount = updateCount + 1;
         epochUpdateCount = epochUpdateCount + 1;
-        updates(updateCount, :) = [epoch, sampleIndex, outputIndex, inputIndex, ...
-            gradient, desiredWeight, measuredConductance, weights(outputIndex, inputIndex)];
+        fprintf(updatesHandle, ...
+            '%d,%d,%d,%d,%d,%.12g,%.12g,%.12g,%.12g,%.12g\n', ...
+            epoch, sampleIndices(sampleIndex), sampleDigitLabels(sampleIndex), ...
+            outputIndex, inputIndex, sampleMSE, gradient, desiredWeight, ...
+            measuredConductance, weights(outputIndex, inputIndex));
     end
 
     predictions = weights * inputBatch;
     mseHistory(epoch) = mean((predictions - targetBatch).^2, 'all');
-    fprintf(metricsHandle, '%d,%.12g,%d,%d\n', epoch, mseHistory(epoch), ...
-        samplesAboveThreshold, epochUpdateCount);
-    fprintf(['Epoch %d/%d | training pixel MSE = %.8g | ', ...
-        'samples above threshold = %d/%d | updates = %d\n'], ...
-        epoch, config.epochs, mseHistory(epoch), samplesAboveThreshold, ...
-        size(inputBatch, 2), epochUpdateCount);
+    testPredictions = weights * testInputBatch;
+    testMSEHistory(epoch) = mean((testPredictions - testTargetBatch).^2, 'all');
+    fprintf(metricsHandle, '%d,%.12g,%.12g,%d,%d,%d\n', ...
+        epoch, mseHistory(epoch), testMSEHistory(epoch), samplesAboveThreshold, ...
+        zeroGradientCount, epochUpdateCount);
+    fprintf(['Epoch %d/%d | training MSE = %.8g | test MSE = %.8g | ', ...
+        'above threshold = %d/%d | zero gradients = %d | updates = %d\n'], ...
+        epoch, config.epochs, mseHistory(epoch), testMSEHistory(epoch), ...
+        samplesAboveThreshold, nTrain, zeroGradientCount, epochUpdateCount);
 end
 
-updates = updates(1:updateCount, :);
-updateTable = array2table(updates, 'VariableNames', ...
-    {'epoch', 'sampleIndex', 'outputIndex', 'inputIndex', 'gradient', ...
-    'desiredWeight', 'measuredConductanceS', 'measuredWeight'});
-writetable(updateTable, fullfile(resultsDir, 'weight_updates.csv'));
 save(fullfile(resultsDir, 'final_state.mat'), 'weights', 'conductance', ...
-    'mseHistory', 'updates', 'inputBatch', 'targetBatch', 'sampleIndices', ...
-    'digitLabels', 'letterNames', 'config');
+    'mseHistory', 'testMSEHistory', 'inputBatch', 'targetBatch', ...
+    'sampleIndices', 'sampleDigitLabels', 'testInputBatch', 'testTargetBatch', ...
+    'testSampleIndices', 'testDigitLabels', 'digitLabels', 'letterNames', 'config');
 
-predictions = weights * inputBatch;
-for sample = 1:3
-    reconstruction = reshape(min(max(predictions(:, sample), 0), 1), ...
-        config.outputSize, config.outputSize);
-    imagePath = fullfile(resultsDir, sprintf('digit%d_to_%s.png', ...
-        digitLabels(sample), upper(letterNames{sample})));
-    imwrite(reconstruction, imagePath);
+testPredictions = weights * testInputBatch;
+for digitPosition = 1:numel(digitLabels)
+    testRows = find(testDigitLabels == digitLabels(digitPosition));
+    for sampleNumber = 1:min(3, numel(testRows))
+        testRow = testRows(sampleNumber);
+        reconstruction = reshape(min(max(testPredictions(:, testRow), 0), 1), ...
+            config.outputSize, config.outputSize);
+        imagePath = fullfile(resultsDir, sprintf( ...
+            'test_digit%d_sample%02d_to_%s.png', digitLabels(digitPosition), ...
+            sampleNumber, upper(letterNames{digitPosition})));
+        imwrite(reconstruction, imagePath);
+    end
 end
 
 figure;
-plot(1:config.epochs, mseHistory);
+plot(1:config.epochs, mseHistory, '-', 1:config.epochs, testMSEHistory, '--');
 xlabel('Epoch');
-ylabel('Training pixel MSE');
+ylabel('Pixel MSE');
+legend('Training', 'Test');
 title('MNIST digit to letter regression: one device per weight');
 grid on;
-saveas(gcf, fullfile(resultsDir, 'training_mse.png'));
+saveas(gcf, fullfile(resultsDir, 'training_and_test_mse.png'));
 clear metricsCleanup;
+clear updatesCleanup;
 clear smuCleanup;
 clear arduinoCleanup;
+fprintf('Total nonzero-gradient hardware updates: %d.\n', updateCount);
 fprintf('Hardware regression finished. Results: %s\n', resultsDir);
 end
 

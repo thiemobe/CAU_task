@@ -82,8 +82,16 @@ end
 if ~exist('smu', 'var')
     smu = connectSMU;
 end
-fopen(smu)
+if ~strcmpi(get(smu, 'Status'), 'open')
+    fopen(smu);
+end
 turnOnSMUChannels(smu);
+
+% applyReadMeasurement does not set triggers; a leftover count > 1 returns arrays.
+fwrite(smu, ':trig:sour aint');
+fwrite(smu, ':trig:coun 1');
+fwrite(smu, ':trig:sour tim');
+fwrite(smu, sprintf(':trig:tim %10.6e', read_aper));
 
 %% --- Loop over devices, one after another ---
 for d = 1:numel(devices)
@@ -150,6 +158,10 @@ for d = 1:numel(devices)
     setDeviceN(arduinoObj, row_num, col_num); % Ensure proper addressing
     pause(0.1); % small delay for stability
     [~, ~, R_r0, ~] = applyReadMeasurement(smu, U_read, read_aper, I_read);
+    if ~isscalar(R_r0) || ~isfinite(R_r0) || R_r0 <= 0
+        error('Initial read at (%d,%d) returned invalid R: size %s, first values %s.', ...
+            row_num, col_num, mat2str(size(R_r0)), mat2str(R_r0(1:min(end,5))));
+    end
     prev_R_after_last = R_r0;
     prev_G_after_last = 1 ./ R_r0;
 
@@ -196,6 +208,10 @@ for d = 1:numel(devices)
         for t = read_times_s
             pause(1); % cumulative 1 s steps -> t seconds after the pulse
             [U_rt, I_rt, R_rt, T_rt] = applyReadMeasurement(smu, U_read, read_aper, I_read);
+            if ~isscalar(R_rt) || ~isfinite(R_rt) || R_rt <= 0
+                error('Read at %d s returned invalid R: size %s, first values %s.', ...
+                    t, mat2str(size(R_rt)), mat2str(R_rt(1:min(end,5))));
+            end
             TBL.(sprintf('R_after_%ds', t))(i) = R_rt;
             TBL.(sprintf('G_after_%ds', t))(i) = 1 ./ R_rt;
             TBL.(sprintf('I_after_%ds', t))(i) = I_rt;
